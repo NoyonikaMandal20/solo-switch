@@ -35,7 +35,7 @@ serve(async (req) => {
 
       // Send Email via Brevo API
       const emailPayload = {
-        sender: { name: "SoloSwitch Vault", email: "noreply@yourdomain.com" }, // Update with your verified Brevo domain later
+        sender: { name: "SoloSwitch Vault", email: "restay.support@gmail.com" }, // Update with your verified Brevo domain later
         to: [{ email: vault.emergency_email, name: vault.emergency_name || "Emergency Contact" }],
         subject: "🚨 Urgent: SoloSwitch Vault Unlocked",
         htmlContent: `
