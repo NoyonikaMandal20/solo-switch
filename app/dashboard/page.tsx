@@ -1,259 +1,308 @@
 "use client";
 
-import { useState } from "react";
-import { saveVault, checkInAlive } from "@/lib/vault";
-import { ShieldCheck, Terminal, Briefcase, Key, HeartPulse, Save } from "lucide-react";
-
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
+import { ShieldCheck, Lock, HeartPulse, LogOut, AlertCircle } from "lucide-react";
+import { encryptPayload } from "@/lib/crypto";
 export default function DashboardPage() {
-  const [activeTab, setActiveTab] = useState<"business" | "dev">("business");
+  const router = useRouter();
+  const supabase = createClient();
   
-  // Business fields
-  const [banking, setBanking] = useState("");
+  // -- PAGE STATE --
+  const [isCheckingVault, setIsCheckingVault] = useState(true);
+  const [hasActiveVault, setHasActiveVault] = useState(false);
+  const [nextCheckInDue, setNextCheckInDue] = useState<string | null>(null);
+  
+  // -- FORM STATE --
+  const [activeTab, setActiveTab] = useState("business");
+  const [financials, setFinancials] = useState("");
   const [clients, setClients] = useState("");
-  const [instructions, setInstructions] = useState("");
-
-  // Dev fields
-  const [envSecrets, setEnvSecrets] = useState("");
-  const [hosting, setHosting] = useState("");
-  const [killSwitch, setKillSwitch] = useState("");
-
-  // Config fields
-  const [passphrase, setPassphrase] = useState("");
+  const [letter, setLetter] = useState("");
+  const [runbook, setRunbook] = useState("");
   const [emergencyEmail, setEmergencyEmail] = useState("");
-  const [emergencyName, setEmergencyName] = useState("");
-  const [checkInDays, setCheckInDays] = useState(30);
-
+  const [passphrase, setPassphrase] = useState("");
+  
+  // -- UI STATE --
   const [loading, setLoading] = useState(false);
-  const [statusMsg, setStatusMsg] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
 
-  const handleSave = async () => {
-    if (!passphrase) {
-      alert("Master Passphrase is required to encrypt your data locally!");
-      return;
-    }
-    if (!emergencyEmail) {
-      alert("Please provide an emergency contact email.");
-      return;
-    }
+  // 1. Check if user already has a vault on load
+  useEffect(() => {
+    const fetchVaultStatus = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      
+      if (user) {
+        const { data, error } = await supabase
+          .from("vaults")
+          .select("next_check_in_due, status")
+          .eq("user_id", user.id)
+          .single();
 
+        if (data && data.status === "active") {
+          setHasActiveVault(true);
+          setNextCheckInDue(new Date(data.next_check_in_due).toLocaleDateString());
+        }
+      }
+      setIsCheckingVault(false);
+    };
+
+    fetchVaultStatus();
+  }, [supabase]);
+
+  // 2. The "I'm Alive" Reset Timer Function
+  const handleResetTimer = async () => {
     setLoading(true);
-    setStatusMsg("Encrypting locally & storing...");
+    setMessage("");
+    setError("");
 
-    try {
-      await saveVault({
-        payload: {
-          business: {
-            bankingAndPayouts: banking,
-            clientContacts: clients,
-            generalInstructions: instructions,
-          },
-          developer: {
-            envSecrets,
-            hostingAndDomains: hosting,
-            killSwitchSOP: killSwitch,
-          },
-          updatedAt: new Date().toISOString(),
-        },
-        passphrase,
-        emergencyEmail,
-        emergencyName,
-        checkInDays,
-      });
-      setStatusMsg("Vault encrypted and locked successfully.");
-    } catch (err: any) {
-      setStatusMsg(`Error: ${err.message}`);
-    } finally {
+    const { data: { user } } = await supabase.auth.getUser();
+    
+    if (user) {
+      // Add 30 days from today
+      const newDate = new Date();
+      newDate.setDate(newDate.getDate() + 30); 
+
+      const { error } = await supabase
+        .from("vaults")
+        .update({ next_check_in_due: newDate.toISOString() })
+        .eq("user_id", user.id);
+
+      if (error) {
+        setError(error.message);
+      } else {
+        setNextCheckInDue(newDate.toLocaleDateString());
+        setMessage("Timer successfully reset for another 30 days!");
+      }
+    }
+    setLoading(false);
+  };
+
+  // 3. The Sign Out Function
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    router.push("/login");
+  };
+
+  // 4. The Save Vault Function
+  const handleSaveVault = async () => {
+    setLoading(true);
+    setError("");
+    
+    if (!passphrase || !emergencyEmail) {
+      setError("Master passphrase and emergency email are required.");
       setLoading(false);
+      return;
     }
-  };
 
-  const handleCheckIn = async () => {
     try {
-      await checkInAlive();
-      alert("Check-in confirmed! Deadman timer reset.");
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("Not authenticated");
+
+      // Bundle and encrypt the payload
+      const payload = JSON.stringify({ financials, clients, letter, runbook });
+      const encryptedPayload = await encryptPayload(payload, passphrase);
+      const nextCheckIn = new Date();
+      nextCheckIn.setDate(nextCheckIn.getDate() + 30); // 30 day cadence
+
+      const { error: dbError } = await supabase.from("vaults").insert({
+        user_id: user.id,
+        encrypted_payload: encryptedPayload,
+        emergency_email: emergencyEmail,
+        cadence_days: 30,
+        next_check_in_due: nextCheckIn.toISOString(),
+        status: "active",
+      });
+
+      if (dbError) throw dbError;
+
+      setHasActiveVault(true);
+      setNextCheckInDue(nextCheckIn.toLocaleDateString());
     } catch (err: any) {
-      alert(`Check-in failed: ${err.message}`);
+      setError(err.message || "Failed to encrypt and save vault.");
     }
+    setLoading(false);
   };
 
+  // -- RENDER: LOADING STATE --
+  if (isCheckingVault) {
+    return (
+      <div className="min-h-screen bg-neutral-950 flex items-center justify-center font-mono text-emerald-500">
+        Checking secure vault...
+      </div>
+    );
+  }
+
+  // -- RENDER: ACTIVE VAULT STATE --
+  if (hasActiveVault) {
+    return (
+      <div className="min-h-screen bg-neutral-950 text-neutral-100 p-6 font-mono flex flex-col">
+        {/* Header with Sign Out */}
+        <header className="w-full max-w-4xl mx-auto flex justify-between items-center py-4 mb-8 border-b border-neutral-800">
+          <div className="flex items-center gap-2 font-bold text-lg">
+            <ShieldCheck className="text-emerald-500 w-6 h-6" /> SoloSwitch
+          </div>
+          <button 
+            onClick={handleSignOut}
+            className="flex items-center gap-2 text-sm text-neutral-400 hover:text-white transition"
+          >
+            <LogOut className="w-4 h-4" /> Sign Out
+          </button>
+        </header>
+
+        <div className="max-w-2xl mx-auto w-full space-y-6 mt-4">
+          <div className="bg-neutral-900 border border-neutral-800 p-8 rounded-lg text-center space-y-6 shadow-2xl">
+            <Lock className="w-16 h-16 text-emerald-500 mx-auto" />
+            
+            <div>
+              <h2 className="text-2xl font-bold tracking-tight mb-2">Vault is Active & Monitored</h2>
+              <p className="text-neutral-400 text-sm">
+                Your encrypted payload is securely stored. The zero-knowledge deadman engine is monitoring your check-ins.
+              </p>
+            </div>
+            
+            <div className="inline-block bg-neutral-950 border border-neutral-800 px-6 py-4 rounded-lg text-sm text-emerald-400">
+              <span className="block text-neutral-500 uppercase text-xs mb-1">Next Check-in Due</span>
+              <span className="text-xl font-bold">{nextCheckInDue}</span>
+            </div>
+            
+            {error && <p className="text-red-400 text-sm">{error}</p>}
+            {message && <p className="text-emerald-400 text-sm">{message}</p>}
+
+            <div className="pt-4 border-t border-neutral-800">
+              <button 
+                onClick={handleResetTimer}
+                disabled={loading}
+                className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-6 py-4 rounded transition disabled:opacity-50"
+              >
+                <HeartPulse className="w-5 h-5" /> I'm Alive (Reset Timer)
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // -- RENDER: SETUP NEW VAULT FORM --
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 p-6 md:p-12 font-mono">
-      <div className="max-w-4xl mx-auto space-y-8">
-        
-        {/* Header & Status */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-neutral-800 pb-6 gap-4">
+    <div className="min-h-screen bg-neutral-950 text-neutral-100 p-6 font-mono flex flex-col">
+      {/* Header */}
+      <header className="w-full max-w-4xl mx-auto flex justify-between items-center py-4 mb-8 border-b border-neutral-800">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="text-emerald-500 w-6 h-6" /> 
           <div>
-            <h1 className="text-2xl font-bold flex items-center gap-2">
-              <ShieldCheck className="text-emerald-400" /> SoloSwitch Vault
-            </h1>
-            <p className="text-neutral-400 text-sm mt-1">Zero-Knowledge Business Handover & Deadman Switch</p>
+            <h1 className="font-bold text-lg leading-none">SoloSwitch Vault</h1>
+            <span className="text-xs text-neutral-500">Zero-Knowledge Business Handover</span>
           </div>
-          <button
-            onClick={handleCheckIn}
-            className="flex items-center justify-center gap-2 bg-neutral-900 border border-neutral-700 hover:border-emerald-500 hover:text-emerald-400 px-4 py-2 rounded text-sm transition"
-          >
-            <HeartPulse className="w-4 h-4 text-rose-500" /> I'm Alive (Reset Timer)
-          </button>
         </div>
+        <button onClick={handleSignOut} className="flex items-center gap-2 text-sm text-neutral-400 hover:text-white transition">
+          <LogOut className="w-4 h-4" /> Sign Out
+        </button>
+      </header>
 
-        {/* Tab Navigation */}
-        <div className="flex gap-2 border-b border-neutral-800">
-          <button
+      <div className="max-w-4xl mx-auto w-full space-y-8">
+        
+        {/* Tabs */}
+        <div className="flex gap-6 border-b border-neutral-800 pb-2">
+          <button 
             onClick={() => setActiveTab("business")}
-            className={`flex items-center gap-2 px-4 py-2 border-b-2 text-sm font-medium transition ${
-              activeTab === "business"
-                ? "border-emerald-500 text-white"
-                : "border-transparent text-neutral-500 hover:text-neutral-300"
-            }`}
+            className={`text-sm font-bold flex items-center gap-2 pb-2 -mb-2 ${activeTab === "business" ? "text-emerald-400 border-b-2 border-emerald-400" : "text-neutral-500"}`}
           >
-            <Briefcase className="w-4 h-4" /> 1. Business & Financials
+            1. Business & Financials
           </button>
-          <button
-            onClick={() => setActiveTab("dev")}
-            className={`flex items-center gap-2 px-4 py-2 border-b-2 text-sm font-medium transition ${
-              activeTab === "dev"
-                ? "border-emerald-500 text-white"
-                : "border-transparent text-neutral-500 hover:text-neutral-300"
-            }`}
+          <button 
+            onClick={() => setActiveTab("runbook")}
+            className={`text-sm font-bold flex items-center gap-2 pb-2 -mb-2 ${activeTab === "runbook" ? "text-emerald-400 border-b-2 border-emerald-400" : "text-neutral-500"}`}
           >
-            <Terminal className="w-4 h-4" /> 2. Developer Runbook & Secrets
+            &gt;_ 2. Developer Runbook & Secrets
           </button>
         </div>
 
-        {/* Tab 1: Business */}
-        {activeTab === "business" && (
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs uppercase text-neutral-400 mb-1">Financial Accounts & Payout Instructions</label>
-              <textarea
-                value={banking}
-                onChange={(e) => setBanking(e.target.value)}
-                placeholder="Stripe Dashboard URL, Bank accounts, Wise routing, where monthly profits accumulate..."
-                rows={4}
-                className="w-full bg-neutral-900 border border-neutral-800 rounded p-3 text-sm focus:border-neutral-500 focus:outline-none"
+        {/* Tab Content */}
+        <div className="space-y-6">
+          {activeTab === "business" ? (
+            <>
+              <div className="space-y-2">
+                <label className="text-xs uppercase text-neutral-500 font-bold">Financial Accounts & Payout Instructions</label>
+                <textarea 
+                  value={financials}
+                  onChange={(e) => setFinancials(e.target.value)}
+                  className="w-full h-32 bg-neutral-900 border border-neutral-800 rounded p-4 text-sm focus:border-emerald-500 focus:outline-none" 
+                  placeholder="Stripe Dashboard URL, Bank accounts, Wise routing..."
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs uppercase text-neutral-500 font-bold">Pending Client Handover & Contracts</label>
+                <textarea 
+                  value={clients}
+                  onChange={(e) => setClients(e.target.value)}
+                  className="w-full h-24 bg-neutral-900 border border-neutral-800 rounded p-4 text-sm focus:border-emerald-500 focus:outline-none" 
+                  placeholder="List of active agency clients, outstanding balances..."
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs uppercase text-neutral-500 font-bold">Letter / Instructions for Loved Ones</label>
+                <textarea 
+                  value={letter}
+                  onChange={(e) => setLetter(e.target.value)}
+                  className="w-full h-32 bg-neutral-900 border border-neutral-800 rounded p-4 text-sm focus:border-emerald-500 focus:outline-none" 
+                  placeholder="Step-by-step instructions on what to do with the company..."
+                />
+              </div>
+            </>
+          ) : (
+            <div className="space-y-2">
+              <label className="text-xs uppercase text-neutral-500 font-bold">Developer Runbook & API Keys</label>
+              <textarea 
+                value={runbook}
+                onChange={(e) => setRunbook(e.target.value)}
+                className="w-full h-64 bg-neutral-900 border border-neutral-800 rounded p-4 text-sm focus:border-emerald-500 focus:outline-none font-mono" 
+                placeholder="AWS credentials, Vercel logic, Domain registrars, DB passwords..."
               />
             </div>
-            <div>
-              <label className="block text-xs uppercase text-neutral-400 mb-1">Pending Client Handover & Contracts</label>
-              <textarea
-                value={clients}
-                onChange={(e) => setClients(e.target.value)}
-                placeholder="List of active agency/SaaS clients, outstanding balances, who to notify..."
-                rows={3}
-                className="w-full bg-neutral-900 border border-neutral-800 rounded p-3 text-sm focus:border-neutral-500 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs uppercase text-neutral-400 mb-1">Letter / Instructions for Loved Ones</label>
-              <textarea
-                value={instructions}
-                onChange={(e) => setInstructions(e.target.value)}
-                placeholder="Step-by-step instructions on what to do with the company..."
-                rows={4}
-                className="w-full bg-neutral-900 border border-neutral-800 rounded p-3 text-sm focus:border-neutral-500 focus:outline-none"
-              />
-            </div>
+          )}
+        </div>
+
+        {/* Security Rules (Always visible at bottom) */}
+        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 space-y-4">
+          <div className="flex items-center gap-2 text-yellow-500 font-bold text-sm mb-4">
+            <AlertCircle className="w-4 h-4" /> Security & Trigger Rules
           </div>
-        )}
-
-        {/* Tab 2: Developer Runbook */}
-        {activeTab === "dev" && (
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs uppercase text-neutral-400 mb-1">Critical API Keys & Secrets (.env format)</label>
-              <textarea
-                value={envSecrets}
-                onChange={(e) => setEnvSecrets(e.target.value)}
-                placeholder="STRIPE_SECRET_KEY=sk_live_...&#10;OPENAI_API_KEY=sk-...&#10;DATABASE_URL=postgres://..."
-                rows={6}
-                className="w-full bg-neutral-900 border border-neutral-800 rounded p-3 text-sm font-mono text-emerald-400 focus:border-neutral-500 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs uppercase text-neutral-400 mb-1">Hosting, DNS & Cloud Accounts</label>
-              <textarea
-                value={hosting}
-                onChange={(e) => setHosting(e.target.value)}
-                placeholder="Cloudflare account email, AWS root credentials, Vercel/Hetzner server access..."
-                rows={3}
-                className="w-full bg-neutral-900 border border-neutral-800 rounded p-3 text-sm focus:border-neutral-500 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs uppercase text-neutral-400 mb-1">Kill Switch SOP (Stop Cloud Billing)</label>
-              <textarea
-                value={killSwitch}
-                onChange={(e) => setKillSwitch(e.target.value)}
-                placeholder="1. Log into AWS and pause EC2 instances.&#10;2. Revoke Stripe checkout keys.&#10;3. Put maintenance page up on Cloudflare."
-                rows={4}
-                className="w-full bg-neutral-900 border border-neutral-800 rounded p-3 text-sm focus:border-neutral-500 focus:outline-none"
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Settings & Master Key */}
-        <div className="border-t border-neutral-800 pt-6 space-y-4">
-          <h2 className="text-sm uppercase tracking-wider text-neutral-400 flex items-center gap-2">
-            <Key className="w-4 h-4 text-amber-400" /> Security & Trigger Rules
-          </h2>
-
+          
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs text-neutral-400 mb-1">Master Encryption Passphrase (Don't lose this)</label>
-              <input
-                type="password"
-                value={passphrase}
-                onChange={(e) => setPassphrase(e.target.value)}
-                placeholder="Used to encrypt AES-256 in your browser"
-                className="w-full bg-neutral-900 border border-neutral-800 rounded p-2.5 text-sm focus:border-neutral-500 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-neutral-400 mb-1">Emergency Contact Email</label>
-              <input
+            <div className="space-y-2">
+              <label className="text-xs uppercase text-neutral-500 font-bold">Emergency Contact Email</label>
+              <input 
                 type="email"
                 value={emergencyEmail}
                 onChange={(e) => setEmergencyEmail(e.target.value)}
-                placeholder="partner@example.com"
-                className="w-full bg-neutral-900 border border-neutral-800 rounded p-2.5 text-sm focus:border-neutral-500 focus:outline-none"
+                className="w-full bg-neutral-950 border border-neutral-800 rounded p-3 text-sm focus:border-emerald-500 focus:outline-none" 
+                placeholder="partner@gmail.com"
               />
             </div>
-            <div>
-              <label className="block text-xs text-neutral-400 mb-1">Emergency Contact Name</label>
-              <input
-                type="text"
-                value={emergencyName}
-                onChange={(e) => setEmergencyName(e.target.value)}
-                placeholder="e.g. Sarah Connor"
-                className="w-full bg-neutral-900 border border-neutral-800 rounded p-2.5 text-sm focus:border-neutral-500 focus:outline-none"
+            <div className="space-y-2">
+              <label className="text-xs uppercase text-neutral-500 font-bold">Master Passphrase (Do not lose this)</label>
+              <input 
+                type="password"
+                value={passphrase}
+                onChange={(e) => setPassphrase(e.target.value)}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded p-3 text-sm focus:border-emerald-500 focus:outline-none" 
+                placeholder="••••••••••••"
               />
-            </div>
-            <div>
-              <label className="block text-xs text-neutral-400 mb-1">Check-in Cadence</label>
-              <select
-                value={checkInDays}
-                onChange={(e) => setCheckInDays(Number(e.target.value))}
-                className="w-full bg-neutral-900 border border-neutral-800 rounded p-2.5 text-sm focus:border-neutral-500 focus:outline-none"
-              >
-                <option value={15}>Every 15 days</option>
-                <option value={30}>Every 30 days (Standard)</option>
-                <option value={60}>Every 60 days</option>
-                <option value={90}>Every 90 days</option>
-              </select>
             </div>
           </div>
 
-          <div className="pt-4 flex items-center justify-between">
-            <span className="text-xs text-neutral-400">{statusMsg}</span>
-            <button
-              onClick={handleSave}
-              disabled={loading}
-              className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-6 py-2.5 rounded text-sm transition disabled:opacity-50"
-            >
-              <Save className="w-4 h-4" /> {loading ? "Encrypting..." : "Save & Encrypt Vault"}
-            </button>
-          </div>
+          {error && <p className="text-red-400 text-sm mt-2">{error}</p>}
+
+          <button 
+            onClick={handleSaveVault}
+            disabled={loading || !passphrase || !emergencyEmail}
+            className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-4 rounded transition disabled:opacity-50 mt-4 flex items-center justify-center gap-2"
+          >
+            <Lock className="w-4 h-4" /> Encrypt & Activate Vault
+          </button>
         </div>
 
       </div>

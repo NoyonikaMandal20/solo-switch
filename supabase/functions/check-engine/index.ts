@@ -9,6 +9,7 @@ serve(async (req) => {
   )
   
   const brevoApiKey = Deno.env.get('BREVO_API_KEY') ?? ''
+  const appUrl = Deno.env.get('PUBLIC_APP_URL') ?? 'http://localhost:3000'
   const now = new Date().toISOString()
 
   try {
@@ -44,7 +45,7 @@ serve(async (req) => {
           <p>You have been designated as the emergency contact for this SoloSwitch vault. The founder's deadman timer has expired.</p>
           <p><strong>Click the secure link below to access the encrypted business handover documents:</strong></p>
           <br/>
-          <a href="https://soloswitch.com/claim/${claimToken}" style="background-color: #10b981; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Unlock Vault Credentials</a>
+          <a href="${appUrl}/claim/${claimToken}" style="background-color: #10b981; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Unlock Vault Credentials</a>
           <br/><br/>
           <p><em>This secure link will expire in 7 days. You will need the Master Passphrase provided to you by the founder to decrypt the contents.</em></p>
         `
