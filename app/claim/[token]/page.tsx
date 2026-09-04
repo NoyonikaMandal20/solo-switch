@@ -3,155 +3,190 @@
 import { useState, useEffect } from "react";
 import { useParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { AlertTriangle, Lock, ShieldAlert, CheckCircle } from "lucide-react";
 import { decryptPayload } from "@/lib/crypto";
-import { DecryptedVaultPayload } from "@/types/vault";
-import { ShieldAlert, Unlock, AlertTriangle } from "lucide-react";
 
 export default function ClaimPage() {
   const params = useParams();
   const token = params.token as string;
+  const supabase = createClient();
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [vaultData, setVaultData] = useState<any>(null);
-  
+  // -- PAGE STATE --
+  const [pageStatus, setPageStatus] = useState<"loading" | "valid" | "expired" | "invalid">("loading");
+  const [encryptedPayload, setEncryptedPayload] = useState<string | null>(null);
+
+  // -- DECRYPTION STATE --
   const [passphrase, setPassphrase] = useState("");
-  const [decrypting, setDecrypting] = useState(false);
-  const [decryptedPayload, setDecryptedPayload] = useState<DecryptedVaultPayload | null>(null);
+  const [isDecrypting, setIsDecrypting] = useState(false);
+  const [error, setError] = useState("");
+  const [decryptedData, setDecryptedData] = useState<{
+    financials?: string;
+    clients?: string;
+    letter?: string;
+    runbook?: string;
+  } | null>(null);
 
   useEffect(() => {
-    async function fetchVault() {
-      const supabase = createClient();
-      // Fetch the encrypted payload using the public claim token
-      const { data, error: fetchError } = await supabase
+    const fetchVaultToken = async () => {
+      if (!token) return;
+
+      const { data: vault, error } = await supabase
         .from("vaults")
-        .select("encrypted_payload, claim_token_expires_at")
+        .select("encrypted_payload, claim_token_expires_at, status")
         .eq("claim_token", token)
         .single();
 
-      if (fetchError || !data) {
-        setError("Invalid or missing claim token. This vault does not exist.");
-        setLoading(false);
+      if (error || !vault) {
+        setPageStatus("invalid");
         return;
       }
 
-      if (new Date(data.claim_token_expires_at) < new Date()) {
-        setError("This claim link has expired (7-day limit).");
-        setLoading(false);
+      // 1. Expiration Check Logic (7 Days)
+      const now = new Date();
+      const expiresAt = new Date(vault.claim_token_expires_at);
+
+      if (now > expiresAt || vault.status !== "triggered") {
+        setPageStatus("expired");
         return;
       }
 
-      setVaultData(data);
-      setLoading(false);
-    }
+      setEncryptedPayload(vault.encrypted_payload);
+      setPageStatus("valid");
+    };
 
-    if (token) fetchVault();
-  }, [token]);
+    fetchVaultToken();
+  }, [token, supabase]);
 
   const handleDecrypt = async () => {
-    if (!passphrase) return;
-    setDecrypting(true);
+    setIsDecrypting(true);
     setError("");
 
     try {
-      // Run AES-256-GCM decryption in the browser
-      const decryptedString = await decryptPayload(vaultData.encrypted_payload, passphrase);
-      const parsed = JSON.parse(decryptedString) as DecryptedVaultPayload;
-      setDecryptedPayload(parsed);
+      if (!encryptedPayload) throw new Error("No payload found.");
+      
+      const decryptedString = await decryptPayload(encryptedPayload, passphrase);
+      const parsedData = JSON.parse(decryptedString);
+      
+      setDecryptedData(parsedData);
     } catch (err) {
       setError("Incorrect Master Passphrase. Decryption failed.");
-    } finally {
-      setDecrypting(false);
     }
+    
+    setIsDecrypting(false);
   };
 
-  if (loading) return <div className="min-h-screen bg-neutral-950 text-white flex items-center justify-center font-mono">Verifying secure link...</div>;
+  if (pageStatus === "loading") {
+    return <div className="min-h-screen bg-neutral-950 flex items-center justify-center font-mono text-emerald-500">Verifying secure link...</div>;
+  }
 
-  // Render Error State
-  if (error && !decryptedPayload) {
+  if (pageStatus === "invalid") {
     return (
-      <div className="min-h-screen bg-neutral-950 text-white flex items-center justify-center p-6 font-mono">
-        <div className="bg-red-950/30 border border-red-900 p-6 rounded max-w-md text-center space-y-4">
-          <AlertTriangle className="w-12 h-12 text-red-500 mx-auto" />
-          <h2 className="text-xl font-bold text-red-400">Access Denied</h2>
-          <p className="text-neutral-300 text-sm">{error}</p>
+      <div className="min-h-screen bg-neutral-950 flex items-center justify-center font-mono p-6">
+        <div className="text-center space-y-4">
+          <AlertTriangle className="w-16 h-16 text-neutral-600 mx-auto" />
+          <h2 className="text-2xl font-bold text-neutral-300">Invalid Token</h2>
+          <p className="text-neutral-500">This secure link does not exist or has been malformed.</p>
         </div>
       </div>
     );
   }
 
-  // Render Decryption UI
+  if (pageStatus === "expired") {
+    return (
+      <div className="min-h-screen bg-neutral-950 flex items-center justify-center font-mono p-6">
+        <div className="text-center space-y-4 max-w-md">
+          <ShieldAlert className="w-16 h-16 text-red-500 mx-auto" />
+          <h2 className="text-2xl font-bold text-red-400">Secure Link Expired</h2>
+          <p className="text-neutral-400">
+            For security reasons, this vault access link expired 7 days after the deadman timer was triggered. 
+            The encrypted payload is no longer accessible via this URL.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 p-6 md:p-12 font-mono">
-      <div className="max-w-3xl mx-auto space-y-8">
+    <div className="min-h-screen bg-neutral-950 text-neutral-100 p-6 md:p-12 font-mono flex flex-col items-center">
+      <div className="max-w-3xl w-full mx-auto space-y-8 mt-12">
         
         <div className="text-center space-y-4 border-b border-neutral-800 pb-8">
-          <ShieldAlert className="w-12 h-12 text-rose-500 mx-auto" />
-          <h1 className="text-2xl font-bold">Emergency Vault Unlocked</h1>
-          <p className="text-neutral-400 text-sm">
+          <ShieldAlert className="w-16 h-16 text-rose-500 mx-auto" />
+          <h1 className="text-3xl font-bold">Emergency Vault Unlocked</h1>
+          <p className="text-neutral-400 max-w-xl mx-auto">
             The Deadman timer for this account has expired. Enter the Master Passphrase provided by the founder to decrypt the handover instructions.
           </p>
         </div>
 
-        {/* State 1: Ask for Password */}
-        {!decryptedPayload ? (
-          <div className="max-w-md mx-auto space-y-4 bg-neutral-900 p-6 rounded border border-neutral-800">
-            <div>
-              <label className="block text-xs uppercase text-neutral-400 mb-2">Master Passphrase</label>
-              <input
+        {!decryptedData ? (
+          <div className="max-w-md mx-auto bg-neutral-900 border border-neutral-800 p-6 rounded-lg space-y-4 shadow-2xl">
+            <div className="space-y-2">
+              <label className="text-xs uppercase text-neutral-500 font-bold">Master Passphrase</label>
+              <input 
                 type="password"
                 value={passphrase}
                 onChange={(e) => setPassphrase(e.target.value)}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded p-3 text-sm focus:border-rose-500 focus:outline-none" 
                 placeholder="Enter passphrase..."
-                className="w-full bg-neutral-950 border border-neutral-700 rounded p-3 text-sm focus:border-rose-500 focus:outline-none transition"
               />
             </div>
-            {error && <p className="text-red-400 text-xs text-center">{error}</p>}
-            <button
+            
+            {error && <p className="text-red-400 text-sm text-center">{error}</p>}
+
+            <button 
               onClick={handleDecrypt}
-              disabled={decrypting || !passphrase}
-              className="w-full flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-500 text-white font-medium px-4 py-3 rounded text-sm transition disabled:opacity-50"
+              disabled={isDecrypting || !passphrase}
+              className="w-full bg-rose-900 hover:bg-rose-800 text-white font-bold py-3 rounded transition flex justify-center items-center gap-2 disabled:opacity-50"
             >
-              <Unlock className="w-4 h-4" /> {decrypting ? "Decrypting..." : "Decrypt Vault"}
+              <Lock className="w-4 h-4" /> {isDecrypting ? "Decrypting..." : "Decrypt Vault"}
             </button>
           </div>
         ) : (
-          /* State 2: Show Decrypted Data */
           <div className="space-y-8 animate-in fade-in duration-500">
-            <div className="bg-emerald-950/30 border border-emerald-900 p-4 rounded text-emerald-400 text-sm text-center">
-              Success: Vault decrypted locally. This data was not transmitted in plaintext over the network.
+            <div className="bg-emerald-950/30 border border-emerald-900 p-4 rounded text-emerald-400 text-sm flex items-center gap-3">
+              <CheckCircle className="w-5 h-5 flex-shrink-0" />
+              <p>Success: Vault decrypted locally. This data was not transmitted in plaintext over the network.</p>
             </div>
 
             <div className="space-y-6">
               <h2 className="text-xl font-bold border-b border-neutral-800 pb-2">Business & Financial Handover</h2>
-              <div className="space-y-4">
-                <div>
-                  <h3 className="text-xs uppercase text-neutral-500 mb-1">Financial Accounts & Payouts</h3>
-                  <pre className="bg-neutral-900 border border-neutral-800 p-4 rounded text-sm whitespace-pre-wrap">{decryptedPayload.business.bankingAndPayouts || "None provided."}</pre>
+              
+              <div className="space-y-2">
+                <label className="text-xs uppercase text-neutral-500 font-bold">Financial Accounts & Payouts</label>
+                <div className="bg-neutral-900 border border-neutral-800 rounded p-4 text-sm whitespace-pre-wrap">
+                  {decryptedData.financials || "None provided."}
                 </div>
-                <div>
-                  <h3 className="text-xs uppercase text-neutral-500 mb-1">Instructions for Loved Ones</h3>
-                  <pre className="bg-neutral-900 border border-neutral-800 p-4 rounded text-sm whitespace-pre-wrap">{decryptedPayload.business.generalInstructions || "None provided."}</pre>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs uppercase text-neutral-500 font-bold">Pending Client Handover & Contracts</label>
+                <div className="bg-neutral-900 border border-neutral-800 rounded p-4 text-sm whitespace-pre-wrap">
+                  {decryptedData.clients || "None provided."}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs uppercase text-neutral-500 font-bold">Instructions for Loved Ones</label>
+                <div className="bg-neutral-900 border border-neutral-800 rounded p-4 text-sm whitespace-pre-wrap">
+                  {decryptedData.letter || "None provided."}
                 </div>
               </div>
             </div>
 
-            <div className="space-y-6">
+            <div className="space-y-6 pt-6">
               <h2 className="text-xl font-bold border-b border-neutral-800 pb-2">Developer Runbook & Secrets</h2>
-              <div className="space-y-4">
-                <div>
-                  <h3 className="text-xs uppercase text-neutral-500 mb-1">Emergency Kill Switch SOP</h3>
-                  <pre className="bg-neutral-900 border border-neutral-800 p-4 rounded text-sm whitespace-pre-wrap">{decryptedPayload.developer.killSwitchSOP || "None provided."}</pre>
-                </div>
-                <div>
-                  <h3 className="text-xs uppercase text-neutral-500 mb-1">Environment Variables & API Keys</h3>
-                  <pre className="bg-neutral-900 border border-neutral-800 p-4 rounded text-sm whitespace-pre-wrap text-emerald-400">{decryptedPayload.developer.envSecrets || "None provided."}</pre>
+              
+              <div className="space-y-2">
+                <label className="text-xs uppercase text-neutral-500 font-bold">Environment Variables & API Keys</label>
+                <div className="bg-neutral-900 border border-neutral-800 rounded p-4 text-sm font-mono whitespace-pre-wrap text-emerald-500">
+                  {decryptedData.runbook || "None provided."}
                 </div>
               </div>
             </div>
+
           </div>
         )}
-        
+
       </div>
     </div>
   );

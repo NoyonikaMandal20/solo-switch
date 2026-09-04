@@ -3,15 +3,20 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { ShieldCheck, Lock, HeartPulse, LogOut, AlertCircle } from "lucide-react";
+import { ShieldCheck, Lock, HeartPulse, LogOut, AlertCircle, CreditCard, RotateCcw } from "lucide-react";
 import { encryptPayload } from "@/lib/crypto";
+
 export default function DashboardPage() {
   const router = useRouter();
   const supabase = createClient();
   
   // -- PAGE STATE --
-  const [isCheckingVault, setIsCheckingVault] = useState(true);
-  const [hasActiveVault, setHasActiveVault] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [hasPaid, setHasPaid] = useState(false);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [vaultState, setVaultState] = useState<"none" | "active" | "triggered">("none");
+  const [vaultId, setVaultId] = useState<string | null>(null);
   const [nextCheckInDue, setNextCheckInDue] = useState<string | null>(null);
   
   // -- FORM STATE --
@@ -24,187 +29,234 @@ export default function DashboardPage() {
   const [passphrase, setPassphrase] = useState("");
   
   // -- UI STATE --
-  const [loading, setLoading] = useState(false);
+  const [actionLoading, setActionLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  // 1. Check if user already has a vault on load
   useEffect(() => {
-    const fetchVaultStatus = async () => {
+    const fetchDashboardData = async () => {
       const { data: { user } } = await supabase.auth.getUser();
       
       if (user) {
-        const { data, error } = await supabase
-          .from("vaults")
-          .select("next_check_in_due, status")
-          .eq("user_id", user.id)
-          .single();
+        setUserEmail(user.email ?? "");
+        setUserId(user.id);
 
-        if (data && data.status === "active") {
-          setHasActiveVault(true);
-          setNextCheckInDue(new Date(data.next_check_in_due).toLocaleDateString());
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("has_paid")
+          .eq("id", user.id)
+          .single();
+          
+        if (profile) setHasPaid(profile.has_paid);
+
+        const { data: vault } = await supabase
+          .from("vaults")
+          .select("id, next_check_in_due, status")
+          .eq("user_id", user.id)
+          .in("status", ["active", "triggered"])
+          .maybeSingle();
+
+        if (vault) {
+          setVaultId(vault.id);
+          setVaultState(vault.status as "active" | "triggered");
+          if (vault.status === "active") {
+            setNextCheckInDue(new Date(vault.next_check_in_due).toLocaleDateString());
+          }
         }
       }
-      setIsCheckingVault(false);
+      setIsLoading(false);
     };
 
-    fetchVaultStatus();
+    fetchDashboardData();
   }, [supabase]);
 
-  // 2. The "I'm Alive" Reset Timer Function
-  const handleResetTimer = async () => {
-    setLoading(true);
-    setMessage("");
-    setError("");
-
-    const { data: { user } } = await supabase.auth.getUser();
-    
-    if (user) {
-      // Add 30 days from today
-      const newDate = new Date();
-      newDate.setDate(newDate.getDate() + 30); 
-
-      const { error } = await supabase
-        .from("vaults")
-        .update({ next_check_in_due: newDate.toISOString() })
-        .eq("user_id", user.id);
-
-      if (error) {
-        setError(error.message);
-      } else {
-        setNextCheckInDue(newDate.toLocaleDateString());
-        setMessage("Timer successfully reset for another 30 days!");
-      }
-    }
-    setLoading(false);
-  };
-
-  // 3. The Sign Out Function
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     router.push("/login");
   };
 
-  // 4. The Save Vault Function
+  const handleResetTimer = async () => {
+    setActionLoading(true);
+    setMessage("");
+    setError("");
+
+    const newDate = new Date();
+    newDate.setDate(newDate.getDate() + 30); 
+
+    const { error } = await supabase
+      .from("vaults")
+      .update({ next_check_in_due: newDate.toISOString() })
+      .eq("id", vaultId);
+
+    if (error) {
+      setError(error.message);
+    } else {
+      setNextCheckInDue(newDate.toLocaleDateString());
+      setMessage("Timer successfully reset for another 30 days!");
+    }
+    setActionLoading(false);
+  };
+
+  const handleArchiveVault = async () => {
+    setActionLoading(true);
+    const { error } = await supabase
+      .from("vaults")
+      .update({ status: "archived" })
+      .eq("id", vaultId);
+
+    if (!error) {
+      setVaultState("none");
+      setVaultId(null);
+    }
+    setActionLoading(false);
+  };
+
   const handleSaveVault = async () => {
-    setLoading(true);
+    setActionLoading(true);
     setError("");
     
     if (!passphrase || !emergencyEmail) {
       setError("Master passphrase and emergency email are required.");
-      setLoading(false);
+      setActionLoading(false);
       return;
     }
 
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Not authenticated");
+      if (!userId) throw new Error("Not authenticated");
 
-      // Bundle and encrypt the payload
       const payload = JSON.stringify({ financials, clients, letter, runbook });
       const encryptedPayload = await encryptPayload(payload, passphrase);
-      const nextCheckIn = new Date();
-      nextCheckIn.setDate(nextCheckIn.getDate() + 30); // 30 day cadence
 
-      const { error: dbError } = await supabase.from("vaults").insert({
-        user_id: user.id,
+      const nextCheckIn = new Date();
+      nextCheckIn.setDate(nextCheckIn.getDate() + 30); 
+
+      const { data, error: dbError } = await supabase.from("vaults").insert({
+        user_id: userId,
         encrypted_payload: encryptedPayload,
         emergency_email: emergencyEmail,
         cadence_days: 30,
         next_check_in_due: nextCheckIn.toISOString(),
         status: "active",
-      });
+      }).select("id").single();
 
       if (dbError) throw dbError;
 
-      setHasActiveVault(true);
+      setVaultId(data.id);
+      setVaultState("active");
       setNextCheckInDue(nextCheckIn.toLocaleDateString());
     } catch (err: any) {
       setError(err.message || "Failed to encrypt and save vault.");
     }
-    setLoading(false);
+    setActionLoading(false);
   };
 
-  // -- RENDER: LOADING STATE --
-  if (isCheckingVault) {
+  const Header = () => (
+    <header className="w-full max-w-4xl mx-auto flex justify-between items-center py-4 mb-8 border-b border-neutral-800">
+      <div className="flex items-center gap-2">
+        <ShieldCheck className="text-emerald-500 w-6 h-6" /> 
+        <div>
+          <h1 className="font-bold text-lg leading-none">SoloSwitch Vault</h1>
+          <span className="text-xs text-neutral-500">Zero-Knowledge Business Handover</span>
+        </div>
+      </div>
+      <div className="flex items-center gap-6">
+        {userEmail && <span className="text-sm text-neutral-500 hidden sm:inline-block">{userEmail}</span>}
+        <button onClick={handleSignOut} className="flex items-center gap-2 text-sm text-neutral-400 hover:text-white transition">
+          <LogOut className="w-4 h-4" /> Sign Out
+        </button>
+      </div>
+    </header>
+  );
+
+  if (isLoading) return <div className="min-h-screen bg-neutral-950 flex items-center justify-center font-mono text-emerald-500">Loading secure environment...</div>;
+
+  if (!hasPaid) {
     return (
-      <div className="min-h-screen bg-neutral-950 flex items-center justify-center font-mono text-emerald-500">
-        Checking secure vault...
+      <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col p-6">
+        <Header />
+        <div className="flex-1 flex flex-col items-center justify-center">
+          <ShieldCheck className="text-emerald-500 w-16 h-16 mb-6" />
+          <h2 className="text-3xl font-bold mb-2">Secure Your Legacy</h2>
+          <p className="text-neutral-400 mb-8 max-w-md text-center">
+            Get lifetime access to the SoloSwitch zero-knowledge deadman engine. No recurring fees, no plain-text database rows.
+          </p>
+          <button 
+            onClick={() => {
+              // Replace this string with your actual Dodo Payments test/live link!
+              const dodoLink = "https://test.checkout.dodopayments.com/buy/prd_12345";
+              if (userId) {
+                window.location.href = `${dodoLink}?metadata[user_id]=${userId}`;
+              }
+            }}
+            className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-8 py-4 rounded flex items-center gap-2 transition"
+          >
+            <CreditCard className="w-5 h-5" /> Pay $59 for Lifetime Access
+          </button>
+        </div>
       </div>
     );
   }
 
-  // -- RENDER: ACTIVE VAULT STATE --
-  if (hasActiveVault) {
+  if (vaultState === "triggered") {
     return (
       <div className="min-h-screen bg-neutral-950 text-neutral-100 p-6 font-mono flex flex-col">
-        {/* Header with Sign Out */}
-        <header className="w-full max-w-4xl mx-auto flex justify-between items-center py-4 mb-8 border-b border-neutral-800">
-          <div className="flex items-center gap-2 font-bold text-lg">
-            <ShieldCheck className="text-emerald-500 w-6 h-6" /> SoloSwitch
+        <Header />
+        <div className="flex-1 flex flex-col items-center justify-center">
+          <div className="bg-neutral-900 border border-red-900 p-8 rounded-lg text-center max-w-md">
+            <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
+            <h2 className="text-2xl font-bold mb-2 text-red-400">Vault Triggered</h2>
+            <p className="text-neutral-400 text-sm mb-6">
+              Your deadman timer expired and your vault was sent to your emergency contact. Welcome back. Archive this event to create a new vault.
+            </p>
+            <button 
+              onClick={handleArchiveVault}
+              disabled={actionLoading}
+              className="w-full bg-neutral-800 hover:bg-neutral-700 text-white font-bold py-3 rounded transition flex justify-center items-center gap-2"
+            >
+              <RotateCcw className="w-4 h-4" /> Archive & Start Fresh
+            </button>
           </div>
-          <button 
-            onClick={handleSignOut}
-            className="flex items-center gap-2 text-sm text-neutral-400 hover:text-white transition"
-          >
-            <LogOut className="w-4 h-4" /> Sign Out
-          </button>
-        </header>
+        </div>
+      </div>
+    );
+  }
 
+  if (vaultState === "active") {
+    return (
+      <div className="min-h-screen bg-neutral-950 text-neutral-100 p-6 font-mono flex flex-col">
+        <Header />
         <div className="max-w-2xl mx-auto w-full space-y-6 mt-4">
-          <div className="bg-neutral-900 border border-neutral-800 p-8 rounded-lg text-center space-y-6 shadow-2xl">
-            <Lock className="w-16 h-16 text-emerald-500 mx-auto" />
+          <div className="bg-neutral-900 border border-neutral-800 p-8 rounded-lg text-center shadow-2xl">
+            <Lock className="w-16 h-16 text-emerald-500 mx-auto mb-4" />
+            <h2 className="text-2xl font-bold tracking-tight mb-2">Vault is Active & Monitored</h2>
+            <p className="text-neutral-400 text-sm mb-6">Your encrypted payload is securely stored.</p>
             
-            <div>
-              <h2 className="text-2xl font-bold tracking-tight mb-2">Vault is Active & Monitored</h2>
-              <p className="text-neutral-400 text-sm">
-                Your encrypted payload is securely stored. The zero-knowledge deadman engine is monitoring your check-ins.
-              </p>
-            </div>
-            
-            <div className="inline-block bg-neutral-950 border border-neutral-800 px-6 py-4 rounded-lg text-sm text-emerald-400">
+            <div className="inline-block bg-neutral-950 border border-neutral-800 px-6 py-4 rounded-lg text-emerald-400 mb-6">
               <span className="block text-neutral-500 uppercase text-xs mb-1">Next Check-in Due</span>
               <span className="text-xl font-bold">{nextCheckInDue}</span>
             </div>
             
-            {error && <p className="text-red-400 text-sm">{error}</p>}
-            {message && <p className="text-emerald-400 text-sm">{message}</p>}
+            {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
+            {message && <p className="text-emerald-400 text-sm mb-4">{message}</p>}
 
-            <div className="pt-4 border-t border-neutral-800">
-              <button 
-                onClick={handleResetTimer}
-                disabled={loading}
-                className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-6 py-4 rounded transition disabled:opacity-50"
-              >
-                <HeartPulse className="w-5 h-5" /> I'm Alive (Reset Timer)
-              </button>
-            </div>
+            <button 
+              onClick={handleResetTimer}
+              disabled={actionLoading}
+              className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-6 py-4 rounded transition flex justify-center items-center gap-2 disabled:opacity-50"
+            >
+              <HeartPulse className="w-5 h-5" /> I'm Alive (Reset Timer)
+            </button>
           </div>
         </div>
       </div>
     );
   }
 
-  // -- RENDER: SETUP NEW VAULT FORM --
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 p-6 font-mono flex flex-col">
-      {/* Header */}
-      <header className="w-full max-w-4xl mx-auto flex justify-between items-center py-4 mb-8 border-b border-neutral-800">
-        <div className="flex items-center gap-2">
-          <ShieldCheck className="text-emerald-500 w-6 h-6" /> 
-          <div>
-            <h1 className="font-bold text-lg leading-none">SoloSwitch Vault</h1>
-            <span className="text-xs text-neutral-500">Zero-Knowledge Business Handover</span>
-          </div>
-        </div>
-        <button onClick={handleSignOut} className="flex items-center gap-2 text-sm text-neutral-400 hover:text-white transition">
-          <LogOut className="w-4 h-4" /> Sign Out
-        </button>
-      </header>
-
+      <Header />
       <div className="max-w-4xl mx-auto w-full space-y-8">
         
-        {/* Tabs */}
         <div className="flex gap-6 border-b border-neutral-800 pb-2">
           <button 
             onClick={() => setActiveTab("business")}
@@ -220,7 +272,6 @@ export default function DashboardPage() {
           </button>
         </div>
 
-        {/* Tab Content */}
         <div className="space-y-6">
           {activeTab === "business" ? (
             <>
@@ -265,7 +316,6 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* Security Rules (Always visible at bottom) */}
         <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-6 space-y-4">
           <div className="flex items-center gap-2 text-yellow-500 font-bold text-sm mb-4">
             <AlertCircle className="w-4 h-4" /> Security & Trigger Rules
@@ -298,7 +348,7 @@ export default function DashboardPage() {
 
           <button 
             onClick={handleSaveVault}
-            disabled={loading || !passphrase || !emergencyEmail}
+            disabled={actionLoading || !passphrase || !emergencyEmail}
             className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-4 rounded transition disabled:opacity-50 mt-4 flex items-center justify-center gap-2"
           >
             <Lock className="w-4 h-4" /> Encrypt & Activate Vault
